@@ -17,12 +17,14 @@ stream_notifier.py
   TWITCH_CHANNEL       - логин канала на Twitch (как в URL twitch.tv/<login>)
 
 Необязательные:
-  YOUTUBE_CHANNEL_ID   - ID канала YouTube (UCxxxxxxxx...). Используется и
-                         для проверки прямых эфиров, и для оповещений о
-                         новых загруженных видео.
+  YOUTUBE_CHANNEL_ID   - ID канала YouTube (UCxxxxxxxx...), для отдельного
+                         оповещения о старте на YouTube. Если не задан,
+                         проверка YouTube пропускается.
 
-(Instagram/TikTok сюда не входят — надёжного бесплатного способа их
-проверять нет; см. обсуждение в истории чата.)
+(Оповещения о НОВЫХ ВИДЕО на YouTube — не о прямых эфирах — реализованы
+отдельно, ежедневной сводкой: см. youtube_digest.py и соответствующий
+workflow. Instagram/TikTok сюда не входят — надёжного бесплатного способа
+их проверять нет.)
 """
 
 import json
@@ -33,7 +35,6 @@ import time
 import urllib.request
 import urllib.parse
 import urllib.error
-import xml.etree.ElementTree as ET
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
@@ -55,12 +56,6 @@ DEFAULT_STATE = {
     "twitch_last_stream_id": None,
     "youtube_live": False,
     "youtube_last_video_id": None,
-    # id последнего ЗАГРУЖЕННОГО (не путать с прямым эфиром) видео на
-    # YouTube, о котором уже отправили оповещение. None = ещё ни разу не
-    # проверяли — при первом запуске просто запомним текущее последнее
-    # видео как отправную точку, не будем слать про него оповещение
-    # (иначе при каждом деплое бот бы репортил как "новое" старое видео).
-    "youtube_last_upload_id": None,
 }
 
 
@@ -225,57 +220,6 @@ def check_youtube_live():
         return None
 
 
-# ---------------------------------------------------------------------------
-# YouTube: новые загруженные видео (через публичный RSS-фид канала)
-# ---------------------------------------------------------------------------
-
-YOUTUBE_ATOM_NS = {
-    "atom": "http://www.w3.org/2005/Atom",
-    "yt": "http://www.youtube.com/xml/schemas/2015",
-}
-
-
-def check_latest_youtube_upload():
-    """
-    Возвращает (video_id, title) самого свежего загруженного видео на
-    канале, или (None, None), если не удалось получить.
-
-    Использует официальный публичный RSS/Atom-фид YouTube
-    (youtube.com/feeds/videos.xml?channel_id=...) — бесплатно, без
-    API-ключа и без квоты, обновляется в течение нескольких минут после
-    публикации видео. В фиде обычно 15 последних видео, для оповещений
-    берём только самое первое (свежее).
-    """
-    if not YOUTUBE_CHANNEL_ID:
-        return None, None
-    try:
-        url = "https://www.youtube.com/feeds/videos.xml?" + urllib.parse.urlencode(
-            {"channel_id": YOUTUBE_CHANNEL_ID}
-        )
-        xml_text = http_get(url)
-        root = ET.fromstring(xml_text)
-        entry = root.find("atom:entry", YOUTUBE_ATOM_NS)
-        if entry is None:
-            return None, None
-        video_id_el = entry.find("yt:videoId", YOUTUBE_ATOM_NS)
-        title_el = entry.find("atom:title", YOUTUBE_ATOM_NS)
-        video_id = video_id_el.text.strip() if video_id_el is not None and video_id_el.text else None
-        title = title_el.text.strip() if title_el is not None and title_el.text else ""
-        return video_id, title
-    except (urllib.error.URLError, ET.ParseError) as e:
-        print(f"[warn] Не удалось проверить новые видео YouTube: {e}", file=sys.stderr)
-        return None, None
-
-
-def send_new_video_notification(video_id, title):
-    text = "🎬 <b>Новое видео на YouTube!</b>\n\n"
-    if title:
-        text += f"{title}\n\n"
-    text += f"👉 https://youtube.com/watch?v={video_id}"
-    thumb_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-    send_telegram_photo(thumb_url, text)
-
-
 def build_combined_message(twitch_stream, youtube_video_id):
     """
     Собирает ОДНО оповещение сразу по всем площадкам, которые на момент
@@ -365,21 +309,6 @@ def main():
     state["twitch_last_stream_id"] = twitch_stream.get("id") if twitch_stream else None
     state["youtube_live"] = youtube_is_live
     state["youtube_last_video_id"] = youtube_video_id
-
-    # --- Новые загруженные видео на YouTube (отдельно от прямых эфиров) ---
-    if YOUTUBE_CHANNEL_ID:
-        latest_upload_id, latest_upload_title = check_latest_youtube_upload()
-        if latest_upload_id:
-            known_upload_id = state.get("youtube_last_upload_id")
-            if known_upload_id is None:
-                # Первая проверка после появления этой функции — просто
-                # запоминаем текущее последнее видео, не шлём про него
-                # оповещение (иначе бот "спалит" уже существующее видео
-                # как новое сразу после деплоя).
-                state["youtube_last_upload_id"] = latest_upload_id
-            elif latest_upload_id != known_upload_id:
-                send_new_video_notification(latest_upload_id, latest_upload_title)
-                state["youtube_last_upload_id"] = latest_upload_id
 
     save_state(state)
 
