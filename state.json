@@ -1,4 +1,5 @@
 {
+  "notified": false,
   "twitch_live": false,
   "twitch_last_stream_id": null,
   "youtube_live": false,
