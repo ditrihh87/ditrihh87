@@ -1,0 +1,45 @@
+name: YouTube daily digest
+
+on:
+  schedule:
+    # 21:00 по Москве (UTC+3) = 18:00 UTC
+    - cron: "0 18 * * *"
+  workflow_dispatch: {}   # позволяет запустить вручную кнопкой Run workflow
+
+permissions:
+  contents: write
+
+concurrency:
+  group: youtube-digest
+  cancel-in-progress: false
+
+jobs:
+  digest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run YouTube digest
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          YOUTUBE_CHANNEL_ID: ${{ secrets.YOUTUBE_CHANNEL_ID }}
+        run: python youtube_digest.py
+
+      - name: Commit updated state
+        run: |
+          git config user.name "youtube-digest-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- digest_state.json; then
+            git add digest_state.json
+            git commit -m "Update YouTube digest state [skip ci]"
+            git push
+          else
+            echo "digest_state.json не изменился, коммит не нужен"
+          fi
