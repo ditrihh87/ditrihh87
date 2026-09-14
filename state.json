@@ -3,5 +3,6 @@
   "twitch_live": false,
   "twitch_last_stream_id": null,
   "youtube_live": false,
-  "youtube_last_video_id": null
+  "youtube_last_video_id": null,
+  "youtube_last_upload_id": "lLjBDZHfcOA"
 }
