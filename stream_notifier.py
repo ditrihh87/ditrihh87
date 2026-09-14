@@ -3,10 +3,11 @@
 stream_notifier.py
 
 Проверяет, не начался ли стрим на Twitch и/или YouTube, и если да —
-присылает оповещение в Telegram-канал. Скрипт рассчитан на запуск
-по расписанию (например, каждые 5 минут через GitHub Actions), а не
-как постоянно висящий процесс — он сам хранит состояние в state.json,
-чтобы не слать повторные оповещения на каждый прогон.
+присылает ОДНО оповещение в Telegram-канал (сразу со ссылками на все
+площадки, где стрим уже идёт). Скрипт рассчитан на запуск по расписанию
+(например, каждые 5 минут через GitHub Actions), а не как постоянно
+висящий процесс — он сам хранит состояние в state.json, чтобы не слать
+повторные оповещения на каждый прогон.
 
 Требуемые переменные окружения:
   TELEGRAM_BOT_TOKEN   - токен бота от @BotFather
@@ -25,6 +26,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -38,7 +40,13 @@ TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET", "")
 TWITCH_CHANNEL = os.environ.get("TWITCH_CHANNEL", "")
 YOUTUBE_CHANNEL_ID = os.environ.get("YOUTUBE_CHANNEL_ID", "")
 
+# Сколько ждать (в секундах), если одна площадка уже live, а вторая ещё нет —
+# даём шанс "подтянуться" второй, чтобы отправить одно оповещение сразу с
+# обеими ссылками, а не гнаться за идеальной синхронностью.
+CATCH_UP_WAIT_SECONDS = 30
+
 DEFAULT_STATE = {
+    "notified": False,
     "twitch_live": False,
     "twitch_last_stream_id": None,
     "youtube_live": False,
@@ -207,61 +215,95 @@ def check_youtube_live():
         return None
 
 
+def build_combined_message(twitch_stream, youtube_video_id):
+    """
+    Собирает ОДНО оповещение сразу по всем площадкам, которые на момент
+    отправки оказались live. Возвращает (текст, url_картинки_или_None).
+    """
+    lines = ["🔴 <b>Стрим начался!</b>", ""]
+    thumb_url = None
+
+    if twitch_stream:
+        title = twitch_stream.get("title", "").strip()
+        game = twitch_stream.get("game_name", "").strip()
+        if title:
+            lines.append(title)
+        if game:
+            lines.append(f"Категория: {game}")
+        lines.append(f"👉 Twitch: https://twitch.tv/{TWITCH_CHANNEL}")
+
+        # thumbnail_url приходит вида ".../live_user_<канал>-{width}x{height}.jpg"
+        # и обновляется Twitch каждые несколько минут — это и есть "скриншот" эфира
+        raw_thumb = twitch_stream.get("thumbnail_url", "")
+        if raw_thumb:
+            thumb_url = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
+            # случайный параметр, чтобы Telegram не взял картинку из своего кэша
+            thumb_url += f"?t={twitch_stream.get('id', '')}"
+
+    if youtube_video_id:
+        lines.append(f"👉 YouTube: https://youtube.com/watch?v={youtube_video_id}")
+        if not thumb_url:
+            # hqdefault.jpg YouTube обновляет по ходу трансляции
+            thumb_url = f"https://i.ytimg.com/vi/{youtube_video_id}/hqdefault.jpg"
+
+    return "\n".join(lines), thumb_url
+
+
+def send_combined_notification(twitch_stream, youtube_video_id):
+    text, thumb_url = build_combined_message(twitch_stream, youtube_video_id)
+    if thumb_url:
+        send_telegram_photo(thumb_url, text)
+    else:
+        send_telegram_message(text)
+
+
 # ---------------------------------------------------------------------------
 # Основная логика
 # ---------------------------------------------------------------------------
 
 def main():
     state = load_state()
-    changed = False
 
-    # --- Twitch ---
     twitch_stream = check_twitch_live()
     twitch_is_live = twitch_stream is not None
-    twitch_stream_id = twitch_stream.get("id") if twitch_stream else None
 
-    if twitch_is_live and not state["twitch_live"]:
-        title = twitch_stream.get("title", "").strip()
-        game = twitch_stream.get("game_name", "").strip()
-        text = f"🔴 <b>Стрим начался на Twitch!</b>\n"
-        if title:
-            text += f"{title}\n"
-        if game:
-            text += f"Категория: {game}\n"
-        text += f"\n👉 https://twitch.tv/{TWITCH_CHANNEL}"
-
-        # thumbnail_url приходит вида ".../live_user_<канал>-{width}x{height}.jpg"
-        # и обновляется Twitch каждые несколько минут — это и есть "скриншот" эфира
-        raw_thumb = twitch_stream.get("thumbnail_url", "")
-        if raw_thumb:
-            # добавляем случайный параметр, чтобы Telegram не взял картинку из своего кэша
-            thumb_url = raw_thumb.replace("{width}", "1280").replace("{height}", "720")
-            thumb_url += f"?t={twitch_stream_id or ''}"
-            send_telegram_photo(thumb_url, text)
-        else:
-            send_telegram_message(text)
-
-    state["twitch_live"] = twitch_is_live
-    state["twitch_last_stream_id"] = twitch_stream_id
-    changed = True
-
-    # --- YouTube ---
+    youtube_video_id = None
+    youtube_is_live = False
     if YOUTUBE_CHANNEL_ID:
         youtube_video_id = check_youtube_live()
         youtube_is_live = youtube_video_id is not None
 
-        if youtube_is_live and not state["youtube_live"]:
-            text = (
-                "🔴 <b>Стрим начался на YouTube!</b>\n\n"
-                f"👉 https://youtube.com/watch?v={youtube_video_id}"
-            )
-            # hqdefault.jpg YouTube обновляет по ходу трансляции — тоже
-            # получается что-то вроде живого кадра с эфира
-            thumb_url = f"https://i.ytimg.com/vi/{youtube_video_id}/hqdefault.jpg"
-            send_telegram_photo(thumb_url, text)
+    any_live = twitch_is_live or youtube_is_live
+    already_notified = state.get("notified", False)
 
-        state["youtube_live"] = youtube_is_live
-        state["youtube_last_video_id"] = youtube_video_id
+    if any_live and not already_notified:
+        # Одна из площадок уже live, а вторая (если используется) — ещё нет.
+        # Даём ей немного времени подтянуться, чтобы отправить одно
+        # оповещение сразу с обеими ссылками, а не гнаться за идеальной
+        # синхронностью между Twitch и YouTube.
+        youtube_pending = YOUTUBE_CHANNEL_ID and not youtube_is_live
+        twitch_pending = not twitch_is_live
+        if (twitch_is_live and youtube_pending) or (youtube_is_live and twitch_pending):
+            time.sleep(CATCH_UP_WAIT_SECONDS)
+            if not twitch_is_live:
+                twitch_stream = check_twitch_live()
+                twitch_is_live = twitch_stream is not None
+            if YOUTUBE_CHANNEL_ID and not youtube_is_live:
+                youtube_video_id = check_youtube_live()
+                youtube_is_live = youtube_video_id is not None
+
+        send_combined_notification(
+            twitch_stream if twitch_is_live else None,
+            youtube_video_id if youtube_is_live else None,
+        )
+        state["notified"] = True
+    elif not any_live:
+        state["notified"] = False
+
+    state["twitch_live"] = twitch_is_live
+    state["twitch_last_stream_id"] = twitch_stream.get("id") if twitch_stream else None
+    state["youtube_live"] = youtube_is_live
+    state["youtube_last_video_id"] = youtube_video_id
 
     save_state(state)
 
