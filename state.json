@@ -1,7 +1,7 @@
 {
   "notified": true,
-  "twitch_live": false,
-  "twitch_last_stream_id": null,
+  "twitch_live": true,
+  "twitch_last_stream_id": "321783549019",
   "youtube_live": true,
   "youtube_last_video_id": "RmZYhRmOQlo",
   "youtube_last_upload_id": "lLjBDZHfcOA"
